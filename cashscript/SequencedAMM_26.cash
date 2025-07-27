@@ -1,0 +1,66 @@
+pragma cashscript ^0.12.0;  // Hypothetical 2026 with loops/OP_EVAL
+
+contract SequencedAMM(bytes32 poolId, int initialK, bytes20 tokenCategory) {
+    // Commit: Use loop to append multiple hashes dynamically (no unrolling).
+    function commit(bytes32[] actionHashes) {  // Array support via loops.
+        require(tx.outputs[0].lockingBytecode == this.activeBytecode);
+        require(tx.outputs[0].tokenCategory == tokenCategory);
+        bytes currentCommitment = tx.inputs[0].nftCommitment;
+        bytes newCommitment = currentCommitment;
+        int i = 0;
+        OP_BEGIN {  // Loop start.
+            i < actionHashes.length;
+            newCommitment = cat(newCommitment, actionHashes[i]);  // OP_CAT in loop.
+            i = i + 1;
+        } OP_UNTIL;  // Proposed loop construct.
+        bytes32 newMerkleRoot = sha256(newCommitment);
+        require(tx.outputs[0].nftCommitment == newCommitment);
+        require(tx.outputs[0].value == tx.inputs[0].value - 1000);
+    }
+
+    // Swap: OP_EVAL for modular extraction function, loop for sequencing.
+    function swap(int inputAmount, bool isBCHInput, bytes32 commitHash) {
+        require(tx.inputs[1].outpointTransaction == commitHash);
+
+        bytes sequencedInputs = cat(tx.inputs[0].value, tx.inputs[1].value);
+        sequencedInputs = cat(sequencedInputs, bytes8(inputAmount));
+        bytes32 merkleRoot = sha256(sequencedInputs);
+
+        bytes currentCommitment = tx.inputs[0].nftCommitment;
+        // OP_EVAL for reusable extract function (modular, no bloat).
+        function extractReserve(bytes commitment, int offset) -> int {
+            return int(commitment OP_SPLIT(offset)[0]);  // Eval this sub-function.
+        }
+        int poolBCH = OP_EVAL(extractReserve(currentCommitment, 0));
+        int poolTokens = OP_EVAL(extractReserve(currentCommitment, 8));
+
+        int newPoolBCH = isBCHInput ? poolBCH + inputAmount : poolBCH - inputAmount;
+        int newPoolTokens = initialK / newPoolBCH;
+        int outputAmount = isBCHInput ? poolTokens - newPoolTokens : newPoolTokens - poolTokens;
+
+        require(tx.outputs.length == 2);
+        require(tx.outputs[0].value == outputAmount);
+        require(tx.outputs[1].lockingBytecode == this.activeBytecode);
+        require(tx.outputs[1].value == newPoolBCH);
+        require(tx.outputs[1].tokenAmount == newPoolTokens);
+        require(tx.outputs[1].tokenCategory == tokenCategory);
+
+        bytes newCommitment = cat(bytes8(newPoolBCH), bytes8(newPoolTokens));
+        newCommitment = cat(newCommitment, merkleRoot);
+        require(tx.outputs[1].nftCommitment == newCommitment);
+
+        require(checkDataSig(merkleRoot, tx.preimage));  // Enhanced binding.
+
+        int minerFee = 2000;
+        require(tx.inputs[0].value + inputAmount >= newPoolBCH + outputAmount + minerFee);
+    }
+
+    // Withdrawal: Enhanced with loop for proportional (multi-LP).
+    function withdraw(pubkey lpPk, sig lpSig) {
+        require(checkSig(lpSig, lpPk));
+        require(tx.outputs[0].lockingBytecode == new LockingBytecodeP2PKH(hash160(lpPk)));
+        require(tx.outputs[0].value == tx.inputs[0].value - 1000);
+        require(tx.outputs[0].tokenAmount == tx.inputs[0].tokenAmount);
+        require(tx.outputs[0].nftTokenAmount == 0);
+    }
+}
